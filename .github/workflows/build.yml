@@ -26,7 +26,16 @@ jobs:
     timeout-minutes: 60
 
     steps:
-      # ---- 1. 取源码 ----
+      # ---- 1. 先检出我们自己的仓库（assets/ 目录在这）----
+      - name: Checkout jmgo-n3-channels
+        uses: actions/checkout@v4
+        with:
+          path: jmgo-n3-channels
+          sparse-checkout: |
+            assets
+            README.md
+
+      # ---- 2. 再取 FongMi/TV 源码 ----
       - name: Checkout FongMi/TV
         uses: actions/checkout@v4
         with:
@@ -45,7 +54,7 @@ jobs:
       - name: 注入 assets/spider 与 config.json
         run: |
           set -e
-          SRC_DIR="$GITHUB_WORKSPACE/assets"
+          SRC_DIR="$GITHUB_WORKSPACE/jmgo-n3-channels/assets"
           APP_DIR="$GITHUB_WORKSPACE/FongMi-TV/app/src/main/assets"
           rm -rf "$APP_DIR/spider" "$APP_DIR/config"
           mkdir -p "$APP_DIR/spider" "$APP_DIR/config"
