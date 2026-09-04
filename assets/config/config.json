@@ -1,0 +1,101 @@
+name: Build FongMi APK
+
+# 触发条件：手动触发（最稳，channels 改动后主动跑）
+on:
+  workflow_dispatch:
+    inputs:
+      flavor:
+        description: '构建版本'
+        required: true
+        default: 'leanback'
+        type: choice
+        options:
+          - leanback    # 电视 / 投影仪
+          - mobile      # 手机 / 平板
+
+# 同时也允许在 assets/ 目录变更时自动跑
+  push:
+    paths:
+      - 'assets/**'
+      - 'FongMi-TV/**'
+      - '.github/workflows/build.yml'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      # ---- 1. 取源码 ----
+      - name: Checkout FongMi/TV
+        uses: actions/checkout@v4
+        with:
+          repository: FongMi/TV
+          ref: main
+          path: FongMi-TV
+
+      # ---- 2. 准备 JDK 17（FongMi 推荐；JDK 21 在部分插件上会失败）----
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      # ---- 3. 注入我们的 276 频道源 ----
+      - name: 注入 assets/spider 与 config.json
+        run: |
+          set -e
+          SRC_DIR="$GITHUB_WORKSPACE/assets"
+          APP_DIR="$GITHUB_WORKSPACE/FongMi-TV/app/src/main/assets"
+          rm -rf "$APP_DIR/spider" "$APP_DIR/config"
+          mkdir -p "$APP_DIR/spider" "$APP_DIR/config"
+          cp -r "$SRC_DIR/spider/."    "$APP_DIR/spider/"
+          cp -r "$SRC_DIR/config/."    "$APP_DIR/config/"
+          echo "=== 注入完成 ==="
+          ls "$APP_DIR/spider" | head -5
+          echo "..."
+          echo "总 .py 文件数：$(find "$APP_DIR/spider" -name '*.py' | wc -l)"
+          echo "config.json sites 数：$(python3 -c "import json; print(len(json.load(open('$APP_DIR/config/config.json'))['sites']))")"
+
+      # ---- 4. 接受 Android SDK license ----
+      - name: Accept Android SDK licenses
+        run: |
+          mkdir -p $HOME/android-sdk/cmdline-tools
+          cd $HOME/android-sdk/cmdline-tools
+          if [ ! -d "latest" ]; then
+            curl -fsSL -o cmd.zip https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip
+            unzip -q cmd.zip
+            mv cmdline-tools latest
+            rm cmd.zip
+          fi
+          export ANDROID_HOME=$HOME/android-sdk
+          export ANDROID_SDK_ROOT=$ANDROID_HOME
+          export PATH=$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/platform-tools:$PATH
+          yes | sdkmanager --licenses > /dev/null
+          sdkmanager "platforms;android-34" "build-tools;34.0.0" "platform-tools"
+          echo "ANDROID_HOME=$ANDROID_HOME" >> $GITHUB_ENV
+          echo "$ANDROID_HOME/cmdline-tools/latest/bin" >> $GITHUB_PATH
+          echo "$ANDROID_HOME/platform-tools" >> $GITHUB_PATH
+
+      # ---- 5. 配置本地.properties ----
+      - name: 写入 local.properties
+        run: |
+          echo "sdk.dir=$ANDROID_HOME" > FongMi-TV/local.properties
+          cat FongMi-TV/local.properties
+
+      # ---- 6. 赋予 Gradlew 权限 + 触发构建 ----
+      - name: Build APK (${{ inputs.flavor || 'leanback' }}Release)
+        working-directory: FongMi-TV
+        run: |
+          chmod +x ./gradlew
+          ./gradlew clean :app:assemble${{ inputs.flavor || 'leanback' }}Release \
+            -x lint -x lintVitalRelease --no-daemon --stacktrace
+
+      # ---- 7. 上传 APK ----
+      - name: 上传构建产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-${{ inputs.flavor || 'leanback' }}-release
+          path: FongMi-TV/app/build/outputs/apk/${{ inputs.flavor || 'leanback' }}/release/*.apk
+          if-no-files-found: error
+          retention-days: 30
