@@ -108,7 +108,7 @@ jobs:
         run: |
           chmod +x ./gradlew
           ./gradlew clean :app:assemble${{ inputs.flavor || 'leanback' }}Release \
-            -x lint -x lintVitalRelease --no-daemon --stacktrace
+            -x lint --no-daemon --stacktrace
 
       # ---- 7. 上传 APK ----
       - name: 上传构建产物
