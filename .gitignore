@@ -1,0 +1,15 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+
+# 临时 / 工具文件
+tools/_pindao_unzipped/
+tools/_pindao_meta.csv
+tools/_dedup_log.txt
+tools/_chlist.json
+
+# 系统
+.DS_Store
+Thumbs.db
