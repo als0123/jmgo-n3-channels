@@ -26,26 +26,41 @@ jobs:
     timeout-minutes: 60
 
     steps:
-      # ---- 1. 取源码 ----
+      # ---- 1. 先检出我们自己的仓库（assets/ 目录在这）----
+      - name: Checkout jmgo-n3-channels
+        uses: actions/checkout@v4
+        with:
+          path: jmgo-n3-channels
+          sparse-checkout: |
+            assets
+            README.md
+
+      # ---- 2. 再取 FongMi/TV 源码 ----
       - name: Checkout FongMi/TV
         uses: actions/checkout@v4
         with:
           repository: FongMi/TV
-          ref: main
+          ref: fongmi
           path: FongMi-TV
 
-      # ---- 2. 准备 JDK 17（FongMi 推荐；JDK 21 在部分插件上会失败）----
+      # ---- 2. 准备 Python 3.10（Chaquopy 构建需要）----
+      - name: Set up Python 3.10
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      # ---- 3. 准备 JDK 17（FongMi 推荐；JDK 21 在部分插件上会失败）----
       - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
 
-      # ---- 3. 注入我们的 276 频道源 ----
+      # ---- 4. 注入我们的 276 频道源 ----
       - name: 注入 assets/spider 与 config.json
         run: |
           set -e
-          SRC_DIR="$GITHUB_WORKSPACE/assets"
+          SRC_DIR="$GITHUB_WORKSPACE/jmgo-n3-channels/assets"
           APP_DIR="$GITHUB_WORKSPACE/FongMi-TV/app/src/main/assets"
           rm -rf "$APP_DIR/spider" "$APP_DIR/config"
           mkdir -p "$APP_DIR/spider" "$APP_DIR/config"
@@ -57,7 +72,7 @@ jobs:
           echo "总 .py 文件数：$(find "$APP_DIR/spider" -name '*.py' | wc -l)"
           echo "config.json sites 数：$(python3 -c "import json; print(len(json.load(open('$APP_DIR/config/config.json'))['sites']))")"
 
-      # ---- 4. 接受 Android SDK license ----
+      # ---- 5. 接受 Android SDK license ----
       - name: Accept Android SDK licenses
         run: |
           mkdir -p $HOME/android-sdk/cmdline-tools
@@ -77,19 +92,42 @@ jobs:
           echo "$ANDROID_HOME/cmdline-tools/latest/bin" >> $GITHUB_PATH
           echo "$ANDROID_HOME/platform-tools" >> $GITHUB_PATH
 
-      # ---- 5. 配置本地.properties ----
-      - name: 写入 local.properties
+      # ---- 6. 生成调试密钥 + 配置 local.properties ----
+      - name: 生成调试密钥并写入 local.properties
         run: |
-          echo "sdk.dir=$ANDROID_HOME" > FongMi-TV/local.properties
-          cat FongMi-TV/local.properties
+          cd FongMi-TV
+          # 生成调试密钥
+          keytool -genkey -v -keystore debug.keystore -alias debug \
+            -keyalg RSA -keysize 2048 -validity 10000 \
+            -storepass android -keypass android -dname "CN=Debug,OU=Debug,O=Debug,L=Debug,ST=Debug,C=US"
+          # 写入 local.properties
+          echo "sdk.dir=$ANDROID_HOME" > local.properties
+          echo "storeFile=debug.keystore" >> local.properties
+          echo "storePassword=android" >> local.properties
+          echo "keyAlias=debug" >> local.properties
+          echo "keyPassword=android" >> local.properties
+          cat local.properties
 
-      # ---- 6. 赋予 Gradlew 权限 + 触发构建 ----
+      # ---- 6.5 修补 Media3 依赖（FongMi fongmi 分支代码用了 androidx.media3 但依赖写的是旧版 androidx.media）----
+      - name: 修补 Media3 依赖
+        run: |
+          set -e
+          BUILD_FILE="$GITHUB_WORKSPACE/FongMi-TV/app/build.gradle"
+          # 删除旧的 media 依赖行
+          sed -i "/implementation libs.media/d" "$BUILD_FILE"
+          # 在 dependencies 块末尾插入正确的 Media3 依赖
+          # 用 sed 在最后一个闭合括号前插入
+          sed -i '/^dependencies {/a\    implementation "androidx.media3:media3-common:1.5.1"\n    implementation "androidx.media3:media3-ui:1.5.1"\n    implementation "androidx.media3:media3-exoplayer:1.5.1"\n    implementation "androidx.media3:media3-exoplayer-hls:1.5.1"' "$BUILD_FILE"
+          echo "=== 修补后的依赖 ==="
+          grep -A 20 "^dependencies {" "$BUILD_FILE"
+
+      # ---- 7. 赋予 Gradlew 权限 + 触发构建 ----
       - name: Build APK (${{ inputs.flavor || 'leanback' }}Release)
         working-directory: FongMi-TV
         run: |
           chmod +x ./gradlew
           ./gradlew clean :app:assemble${{ inputs.flavor || 'leanback' }}Release \
-            -x lint -x lintVitalRelease --no-daemon --stacktrace
+            -x lint --no-daemon --stacktrace
 
       # ---- 7. 上传 APK ----
       - name: 上传构建产物
