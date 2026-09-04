@@ -43,14 +43,20 @@ jobs:
           ref: fongmi
           path: FongMi-TV
 
-      # ---- 2. 准备 JDK 17（FongMi 推荐；JDK 21 在部分插件上会失败）----
+      # ---- 2. 准备 Python 3.10（Chaquopy 构建需要）----
+      - name: Set up Python 3.10
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      # ---- 3. 准备 JDK 17（FongMi 推荐；JDK 21 在部分插件上会失败）----
       - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
 
-      # ---- 3. 注入我们的 276 频道源 ----
+      # ---- 4. 注入我们的 276 频道源 ----
       - name: 注入 assets/spider 与 config.json
         run: |
           set -e
@@ -66,7 +72,7 @@ jobs:
           echo "总 .py 文件数：$(find "$APP_DIR/spider" -name '*.py' | wc -l)"
           echo "config.json sites 数：$(python3 -c "import json; print(len(json.load(open('$APP_DIR/config/config.json'))['sites']))")"
 
-      # ---- 4. 接受 Android SDK license ----
+      # ---- 5. 接受 Android SDK license ----
       - name: Accept Android SDK licenses
         run: |
           mkdir -p $HOME/android-sdk/cmdline-tools
@@ -86,7 +92,7 @@ jobs:
           echo "$ANDROID_HOME/cmdline-tools/latest/bin" >> $GITHUB_PATH
           echo "$ANDROID_HOME/platform-tools" >> $GITHUB_PATH
 
-      # ---- 5. 生成调试密钥 + 配置 local.properties ----
+      # ---- 6. 生成调试密钥 + 配置 local.properties ----
       - name: 生成调试密钥并写入 local.properties
         run: |
           cd FongMi-TV
