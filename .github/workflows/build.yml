@@ -1,6 +1,5 @@
 name: Build FongMi APK
 
-# 触发条件：手动触发（最稳，channels 改动后主动跑）
 on:
   workflow_dispatch:
     inputs:
@@ -13,20 +12,18 @@ on:
           - leanback    # 电视 / 投影仪
           - mobile      # 手机 / 平板
 
-# 同时也允许在 assets/ 目录变更时自动跑
   push:
     paths:
       - 'assets/**'
-      - 'FongMi-TV/**'
       - '.github/workflows/build.yml'
 
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 30
 
     steps:
-      # ---- 1. 先检出我们自己的仓库（assets/ 目录在这）----
+      # ---- 1. 检出我们的仓库（assets/ 目录）----
       - name: Checkout jmgo-n3-channels
         uses: actions/checkout@v4
         with:
@@ -35,105 +32,95 @@ jobs:
             assets
             README.md
 
-      # ---- 2. 再取 FongMi/TV 源码 ----
-      - name: Checkout FongMi/TV
-        uses: actions/checkout@v4
-        with:
-          repository: FongMi/TV
-          ref: fongmi
-          path: FongMi-TV
+      # ---- 2. 下载 FongMi 预编译 APK ----
+      - name: 下载 FongMi 预编译 APK
+        run: |
+          set -e
+          FLAVOR="${{ inputs.flavor || 'leanback' }}"
+          ARCH="arm64_v8a"
+          APK_URL="https://raw.githubusercontent.com/FongMi/Release/fongmi/apk/${FLAVOR}-${ARCH}.apk"
+          echo "下载: $APK_URL"
+          curl -fsSL -o base.apk "$APK_URL"
+          ls -lh base.apk
+          echo "APK_SIZE=$(stat -c%s base.apk)" >> $GITHUB_ENV
 
-      # ---- 2. 准备 Python 3.10（Chaquopy 构建需要）----
-      - name: Set up Python 3.10
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.10'
-
-      # ---- 3. 准备 JDK 17（FongMi 推荐；JDK 21 在部分插件上会失败）----
+      # ---- 3. 准备 JDK 17（用于 apksigner）----
       - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
 
-      # ---- 4. 注入我们的 276 频道源 ----
-      - name: 注入 assets/spider 与 config.json
-        run: |
-          set -e
-          SRC_DIR="$GITHUB_WORKSPACE/jmgo-n3-channels/assets"
-          APP_DIR="$GITHUB_WORKSPACE/FongMi-TV/app/src/main/assets"
-          rm -rf "$APP_DIR/spider" "$APP_DIR/config"
-          mkdir -p "$APP_DIR/spider" "$APP_DIR/config"
-          cp -r "$SRC_DIR/spider/."    "$APP_DIR/spider/"
-          cp -r "$SRC_DIR/config/."    "$APP_DIR/config/"
-          echo "=== 注入完成 ==="
-          ls "$APP_DIR/spider" | head -5
-          echo "..."
-          echo "总 .py 文件数：$(find "$APP_DIR/spider" -name '*.py' | wc -l)"
-          echo "config.json sites 数：$(python3 -c "import json; print(len(json.load(open('$APP_DIR/config/config.json'))['sites']))")"
-
-      # ---- 5. 接受 Android SDK license ----
-      - name: Accept Android SDK licenses
+      # ---- 4. 安装 Android SDK build-tools（提供 apksigner + zipalign）----
+      - name: Install Android SDK tools
         run: |
           mkdir -p $HOME/android-sdk/cmdline-tools
           cd $HOME/android-sdk/cmdline-tools
-          if [ ! -d "latest" ]; then
-            curl -fsSL -o cmd.zip https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip
-            unzip -q cmd.zip
-            mv cmdline-tools latest
-            rm cmd.zip
-          fi
-          export ANDROID_HOME=$HOME/android-sdk
-          export ANDROID_SDK_ROOT=$ANDROID_HOME
-          export PATH=$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/platform-tools:$PATH
+          curl -fsSL -o cmd.zip https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip
+          unzip -q cmd.zip
+          mv cmdline-tools latest
+          rm cmd.zip
+          export PATH=$HOME/android-sdk/cmdline-tools/latest/bin:$PATH
           yes | sdkmanager --licenses > /dev/null
-          sdkmanager "platforms;android-34" "build-tools;34.0.0" "platform-tools"
-          echo "ANDROID_HOME=$ANDROID_HOME" >> $GITHUB_ENV
-          echo "$ANDROID_HOME/cmdline-tools/latest/bin" >> $GITHUB_PATH
-          echo "$ANDROID_HOME/platform-tools" >> $GITHUB_PATH
+          sdkmanager "build-tools;34.0.0" "platform-tools"
+          echo "ANDROID_HOME=$HOME/android-sdk" >> $GITHUB_ENV
+          echo "$HOME/android-sdk/build-tools/34.0.0" >> $GITHUB_PATH
 
-      # ---- 6. 生成调试密钥 + 配置 local.properties ----
-      - name: 生成调试密钥并写入 local.properties
-        run: |
-          cd FongMi-TV
-          # 生成调试密钥
-          keytool -genkey -v -keystore debug.keystore -alias debug \
-            -keyalg RSA -keysize 2048 -validity 10000 \
-            -storepass android -keypass android -dname "CN=Debug,OU=Debug,O=Debug,L=Debug,ST=Debug,C=US"
-          # 写入 local.properties
-          echo "sdk.dir=$ANDROID_HOME" > local.properties
-          echo "storeFile=debug.keystore" >> local.properties
-          echo "storePassword=android" >> local.properties
-          echo "keyAlias=debug" >> local.properties
-          echo "keyPassword=android" >> local.properties
-          cat local.properties
-
-      # ---- 6.5 修补 Media3 依赖（FongMi fongmi 分支代码用了 androidx.media3 但依赖写的是旧版 androidx.media）----
-      - name: 修补 Media3 依赖
+      # ---- 5. 注入我们的频道文件到 APK ----
+      - name: 注入频道源到 APK
         run: |
           set -e
-          BUILD_FILE="$GITHUB_WORKSPACE/FongMi-TV/app/build.gradle"
-          # 删除旧的 media 依赖行
-          sed -i "/implementation libs.media/d" "$BUILD_FILE"
-          # 在 dependencies 块末尾插入正确的 Media3 依赖
-          # 用 sed 在最后一个闭合括号前插入
-          sed -i '/^dependencies {/a\    implementation "androidx.media3:media3-common:1.5.1"\n    implementation "androidx.media3:media3-ui:1.5.1"\n    implementation "androidx.media3:media3-exoplayer:1.5.1"\n    implementation "androidx.media3:media3-exoplayer-hls:1.5.1"' "$BUILD_FILE"
-          echo "=== 修补后的依赖 ==="
-          grep -A 20 "^dependencies {" "$BUILD_FILE"
+          # APK 本质就是 zip，可以直接添加文件
+          SRC_DIR="$GITHUB_WORKSPACE/jmgo-n3-channels/assets"
+          
+          # 先查看 APK 中已有的 assets 结构
+          echo "=== APK 已有 assets ==="
+          unzip -l base.apk | grep -E "^.*assets/" | head -20 || echo "(无 assets 目录)"
+          
+          # 直接用 zip 命令添加我们的文件到 APK
+          # 注意：APK 中的 assets 目录是 assets/
+          cd "$SRC_DIR"
+          zip -r "$GITHUB_WORKSPACE/base.apk" spider/ config/ \
+            --quiet
+          
+          echo "=== 注入后 APK 中的 spider 文件 ==="
+          unzip -l "$GITHUB_WORKSPACE/base.apk" | grep -E "spider/.*\.py" | head -10
+          echo "..."
+          SPIDER_COUNT=$(unzip -l "$GITHUB_WORKSPACE/base.apk" | grep -cE "spider/.*\.py" || true)
+          echo "总 .py 文件数: $SPIDER_COUNT"
 
-      # ---- 7. 赋予 Gradlew 权限 + 触发构建 ----
-      - name: Build APK (${{ inputs.flavor || 'leanback' }}Release)
-        working-directory: FongMi-TV
+      # ---- 6. 生成调试密钥并签名 APK ----
+      - name: 生成调试密钥并签名 APK
         run: |
-          chmod +x ./gradlew
-          ./gradlew clean :app:assemble${{ inputs.flavor || 'leanback' }}Release \
-            -x lint --no-daemon --stacktrace
+          set -e
+          # 生成调试密钥库
+          keytool -genkey -v -keystore debug.keystore -alias debug \
+            -keyalg RSA -keysize 2048 -validity 10000 \
+            -storepass android -keypass android \
+            -dname "CN=Debug,OU=Debug,O=Debug,L=Debug,ST=Debug,C=US"
+          
+          # 生成对齐 + 签名的 APK
+          FLAVOR="${{ inputs.flavor || 'leanback' }}"
+          OUTPUT_APK="app-${FLAVOR}-release.apk"
+          
+          # zipalign
+          zipalign -f -p 4 base.apk aligned.apk
+          
+          # apksigner
+          apksigner sign --ks debug.keystore --ks-pass pass:android \
+            --ks-key-alias debug --key-pass pass:android \
+            --out "$OUTPUT_APK" aligned.apk
+          
+          echo "=== 签名完成 ==="
+          ls -lh "$OUTPUT_APK"
+          echo "APK_PATH=$GITHUB_WORKSPACE/$OUTPUT_APK" >> $GITHUB_ENV
+          echo "APK_NAME=$OUTPUT_APK" >> $GITHUB_ENV
 
-      # ---- 7. 上传 APK ----
+      # ---- 7. 上传最终 APK ----
       - name: 上传构建产物
         uses: actions/upload-artifact@v4
         with:
           name: app-${{ inputs.flavor || 'leanback' }}-release
-          path: FongMi-TV/app/build/outputs/apk/${{ inputs.flavor || 'leanback' }}/release/*.apk
+          path: app-${{ inputs.flavor || 'leanback' }}-release.apk
           if-no-files-found: error
           retention-days: 30
